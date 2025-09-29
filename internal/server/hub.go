@@ -1,6 +1,6 @@
 package server
 
-import "meadowlark/internal/protocol"
+import "github.com/Chase-Garrett/meadowlark/internal/protocol"
 
 // hub maintains the active clients and forwards messages
 type Hub struct {
@@ -27,7 +27,7 @@ func (h *Hub) Run() {
 		case client := <-h.unregister:
 			if _, ok := h.clients[client.username]; ok {
 				delete(h.clients, client.username)
-				close(cleint.send)
+				close(client.send)
 			}
 		case message := <-h.forward:
 			// find recipient client and send the message

@@ -4,9 +4,10 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"log"
+
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/crypto/bcrypt"
-	"log"
 )
 
 // UserStorage manages user accounts in SQLite
@@ -61,7 +62,7 @@ func (s *UserStorage) RegisterNewUser(username, password string, publicKeyHex st
 }
 
 // GetUserPublicKey retrieves a user's public key
-func (s *UserStorage) GetPublicKey(username string) ([]byte, error) {
+func (s *UserStorage) GetUserPublicKey(username string) ([]byte, error) {
 	querySQL := `SELECT public_key FROM users WHERE username = ?`
 	var publicKey []byte
 

@@ -2,9 +2,11 @@ package server
 
 import (
 	"encoding/json"
-	"github.com/gorilla/websocket"
 	"log"
-	"meadowlark/internal/protocol"
+
+	"github.com/Chase-Garrett/meadowlark/internal/protocol"
+
+	"github.com/gorilla/websocket"
 )
 
 // middleware between websocket connection and hub
@@ -31,7 +33,7 @@ func (c *Client) readPump() {
 
 		var msg protocol.Message
 		if err := json.Unmarshal(messageBytes, &msg); err == nil {
-			msg.Sencer = c.username // ensure correctly identified sender
+			msg.Sender = c.username // ensure correctly identified sender
 			c.hub.forward <- &msg
 		}
 	}

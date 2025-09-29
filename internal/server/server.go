@@ -3,11 +3,13 @@ package server
 import (
 	"encoding/hex"
 	"encoding/json"
-	"github.com/gorilla/websocket"
 	"log"
-	"meadowlark/internal/auth"
 	"net/http"
 	"strings"
+
+	"github.com/Chase-Garrett/meadowlark/internal/auth"
+	"github.com/Chase-Garrett/meadowlark/internal/protocol"
+	"github.com/gorilla/websocket"
 )
 
 var upgrader = websocket.Upgrader{
@@ -42,8 +44,14 @@ type RegistrationRequest struct {
 
 // HandleRegister handles the registration of a user
 func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
-	var req RegistratioonRequest
+	var req RegistrationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	err := s.userStorage.RegisterNewUser(req.Username, req.Password, req.PublicKey)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -54,7 +62,7 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 
 // HandleGetPublicKey serves a user's publickey
 func (s *Server) HandleGetPublicKey(w http.ResponseWriter, r *http.Request) {
-	username := string.TrimPrefix(r.URL.Path, "/keys/")
+	username := strings.TrimPrefix(r.URL.Path, "/keys/")
 	publicKey, err := s.userStorage.GetUserPublicKey(username)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -82,7 +90,7 @@ func (s *Server) HandleConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &Client{hub: s.hub, conn: conn, send: make(chan *protocol.Message, 256), usrname: username}
+	client := &Client{hub: s.hub, conn: conn, send: make(chan *protocol.Message, 256), username: username}
 	client.hub.register <- client
 
 	log.Printf("Client connected: %s", username)

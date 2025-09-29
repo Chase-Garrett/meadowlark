@@ -1,7 +1,7 @@
 package main
 
 import (
-	"meadowlark/internal/server"
+	"github.com/Chase-Garrett/meadowlark/internal/server"
 )
 
 func main() {
