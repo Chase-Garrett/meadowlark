@@ -76,3 +76,25 @@ func (s *UserStorage) GetUserPublicKey(username string) ([]byte, error) {
 
 	return publicKey, nil
 }
+
+// VerifyUser checks if username and password are correct
+func (s *UserStorage) VerifyUser(username, password string) (bool, error) {
+	querySQL := `SELECT hashed_password FROM users WHERE username = ?`
+	var hashedPassword []byte
+
+	err := s.db.QueryRow(querySQL, username).Scan(&hashedPassword)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, errors.New("user not found")
+		}
+		return false, err
+	}
+
+	// Compare the provided password with the stored hash
+	err = bcrypt.CompareHashAndPassword(hashedPassword, []byte(password))
+	if err != nil {
+		return false, nil // Password doesn't match
+	}
+
+	return true, nil // Password matches
+}
