@@ -102,9 +102,14 @@ func (s *Server) HandleConnections(w http.ResponseWriter, r *http.Request) {
 func Start() {
 	server := NewServer()
 
+	// Register API endpoints first
 	http.HandleFunc("/register", server.HandleRegister)
 	http.HandleFunc("/keys/", server.HandleGetPublicKey)
 	http.HandleFunc("/ws", server.HandleConnections)
+
+	// Serve static files (must be last)
+	fs := http.FileServer(http.Dir("./cmd/static"))
+	http.Handle("/", fs)
 
 	log.Println("HTTP server started on :8080")
 	err := http.ListenAndServe(":8080", nil)
