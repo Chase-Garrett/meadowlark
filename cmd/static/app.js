@@ -1,13 +1,17 @@
 class MeadowlarkApp {
     constructor() {
         this.socket = null;
-        this.currentRoom = null;
-        this.currentRoomName = '';
+        this.currentRecipient = null;
+        this.currentRecipientName = '';
         this.username = null;
         this.token = null;
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 5;
-        this.messageHistory = new Map();
+        this.messageHistory = new Map(); // Map<recipient, messages[]>
+        this.users = [];
+        this.keys = null; // {publicKey: CryptoKey, privateKey: CryptoKey}
+        this.recipientPublicKeys = new Map(); // Map<username, CryptoKey>
+        this.publicKeyCache = new Map(); // Map<username, base64 string>
     }
 
     init() {
@@ -58,9 +62,13 @@ class MeadowlarkApp {
 
             if (response.ok) {
                 this.token = data.token;
-                this.username = username;
+                this.username = data.username;
                 localStorage.setItem('meadowlark_token', this.token);
                 localStorage.setItem('meadowlark_username', this.username);
+                
+                // Load encryption keys or generate new ones if missing
+                await this.initializeEncryption();
+                
                 this.showApp();
             } else {
                 this.showAlert(alertDiv, data.error || 'Login failed');
@@ -68,6 +76,31 @@ class MeadowlarkApp {
         } catch (error) {
             this.showAlert(alertDiv, 'Connection error. Please try again.');
             console.error('Login error:', error);
+        }
+    }
+
+    async initializeEncryption() {
+        // Try to load existing keys
+        this.keys = await cryptoUtils.loadKeys();
+        
+        if (!this.keys) {
+            // Generate new keys if none exist (for old users)
+            console.log('No encryption keys found, generating new keys...');
+            const keyPair = await cryptoUtils.generateKeyPair();
+            await cryptoUtils.storeKeys(keyPair);
+            this.keys = { 
+                publicKey: keyPair.publicKey, 
+                privateKey: keyPair.privateKey 
+            };
+            
+            // Upload public key to server (update existing user)
+            try {
+                const publicKeyBase64 = await cryptoUtils.exportPublicKey(this.keys.publicKey);
+                // Note: You might want to add an endpoint to update public key
+                console.log('Generated new keys. Consider updating public key on server.');
+            } catch (error) {
+                console.error('Error updating public key:', error);
+            }
         }
     }
 
@@ -88,10 +121,27 @@ class MeadowlarkApp {
         }
 
         try {
+            // Generate encryption keys for new user
+            alertDiv.textContent = 'Generating encryption keys...';
+            alertDiv.className = 'alert alert-info';
+            alertDiv.classList.remove('d-none');
+            
+            const keyPair = await cryptoUtils.generateKeyPair();
+            const publicKeyBase64 = await cryptoUtils.exportPublicKey(keyPair.publicKey);
+            
+            // Store keys locally
+            await cryptoUtils.storeKeys(keyPair);
+
+            // Register with public key
             const response = await fetch('/api/register', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, email, password })
+                body: JSON.stringify({ 
+                    username, 
+                    email, 
+                    password,
+                    publicKey: publicKeyBase64
+                })
             });
 
             const data = await response.json();
@@ -103,7 +153,7 @@ class MeadowlarkApp {
                 this.showAlert(alertDiv, data.error || 'Registration failed');
             }
         } catch (error) {
-            this.showAlert(alertDiv, 'Connection error. Please try again.');
+            this.showAlert(alertDiv, 'Error: ' + error.message);
             console.error('Registration error:', error);
         }
     }
@@ -114,13 +164,18 @@ class MeadowlarkApp {
         element.classList.remove('d-none');
     }
 
-    showApp() {
+    async showApp() {
         document.getElementById('authContainer').style.display = 'none';
         document.getElementById('appContainer').style.display = 'block';
         document.getElementById('currentUsername').textContent = this.username;
         
+        // Ensure encryption is initialized
+        if (!this.keys) {
+            await this.initializeEncryption();
+        }
+        
         this.connectWebSocket();
-        this.loadRooms();
+        this.loadUsers();
     }
 
     logout() {
@@ -134,7 +189,7 @@ class MeadowlarkApp {
 
     connectWebSocket() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        const wsUrl = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(this.token)}`;
 
         this.socket = new WebSocket(wsUrl);
 
@@ -144,9 +199,13 @@ class MeadowlarkApp {
             this.reconnectAttempts = 0;
         };
 
-        this.socket.onmessage = (event) => {
-            const message = JSON.parse(event.data);
-            this.displayMessage(message);
+        this.socket.onmessage = async (event) => {
+            try {
+                const message = JSON.parse(event.data);
+                await this.handleIncomingMessage(message);
+            } catch (error) {
+                console.error('Error parsing WebSocket message:', error);
+            }
         };
 
         this.socket.onclose = () => {
@@ -158,6 +217,64 @@ class MeadowlarkApp {
         this.socket.onerror = (error) => {
             console.error('WebSocket error:', error);
         };
+    }
+
+    async handleIncomingMessage(message) {
+        // Backend sends: { Recipient, Sender, Content: []byte }
+        // Content is encrypted and base64 encoded in JSON
+        
+        const sender = message.sender || message.Sender;
+        const recipient = message.recipient || message.Recipient;
+        
+        // Determine if this message is for the current conversation
+        const isForCurrentConversation = 
+            (sender === this.currentRecipient && recipient === this.username) ||
+            (sender === this.username && recipient === this.currentRecipient);
+
+        // Decrypt the message content
+        let content = '';
+        if (message.content || message.Content) {
+            const encryptedContentBase64 = message.content || message.Content;
+            
+            if (!this.keys || !this.keys.privateKey) {
+                console.error('Cannot decrypt message: No private key available');
+                content = '[Encrypted message - unable to decrypt]';
+            } else {
+                try {
+                    // Convert base64 to ArrayBuffer
+                    const encryptedContent = cryptoUtils.base64ToArrayBuffer(encryptedContentBase64);
+                    
+                    // Decrypt using our private key
+                    content = await cryptoUtils.decrypt(encryptedContent, this.keys.privateKey);
+                } catch (error) {
+                    console.error('Error decrypting message:', error);
+                    content = '[Error decrypting message]';
+                }
+            }
+        }
+
+        // Add to message history
+        const conversationKey = sender === this.username ? recipient : sender;
+        if (!this.messageHistory.has(conversationKey)) {
+            this.messageHistory.set(conversationKey, []);
+        }
+        
+        const messageObj = {
+            sender: sender,
+            recipient: recipient,
+            content: content,
+            timestamp: new Date().toISOString()
+        };
+        
+        this.messageHistory.get(conversationKey).push(messageObj);
+
+        // Display if it's for the current conversation
+        if (isForCurrentConversation) {
+            this.displayMessage(messageObj);
+        } else {
+            // Show notification or update UI for unread messages
+            this.updateUserUnreadStatus(sender);
+        }
     }
 
     attemptReconnect() {
@@ -179,82 +296,123 @@ class MeadowlarkApp {
         }
     }
 
-    async loadRooms() {
+    async loadUsers() {
         try {
-            const response = await fetch('/api/rooms', {
+            const response = await fetch('/api/users', {
                 headers: { 'Authorization': `Bearer ${this.token}` }
             });
-            const rooms = await response.json();
-            this.displayRooms(rooms);
+            
+            if (!response.ok) {
+                throw new Error('Failed to load users');
+            }
+            
+            const users = await response.json();
+            // Filter out current user
+            this.users = users.filter(u => u !== this.username);
+            this.displayUsers(this.users);
         } catch (error) {
-            console.error('Error loading rooms:', error);
+            console.error('Error loading users:', error);
         }
     }
 
-    displayRooms(rooms) {
-        const roomList = document.getElementById('roomList');
-        roomList.innerHTML = '';
+    displayUsers(users) {
+        const userList = document.getElementById('userList');
+        userList.innerHTML = '';
 
-        if (rooms.length === 0) {
-            roomList.innerHTML = '<li class="text-muted p-3 text-center">No rooms yet. Create one!</li>';
+        if (users.length === 0) {
+            userList.innerHTML = '<li class="text-muted p-3 text-center">No other users yet.</li>';
             return;
         }
 
-        rooms.forEach(room => {
+        users.forEach(username => {
             const li = document.createElement('li');
-            li.className = 'room-item';
-            if (room.id === this.currentRoom) {
+            li.className = 'room-item'; // Reuse room-item class
+            if (username === this.currentRecipient) {
                 li.classList.add('active');
             }
             li.innerHTML = `
-                <div class="room-name">${this.escapeHtml(room.name)}</div>
-                ${room.description ? `<div class="room-description">${this.escapeHtml(room.description)}</div>` : ''}
+                <div class="room-name">${this.escapeHtml(username)}</div>
             `;
-            li.onclick = () => this.selectRoom(room.id, room.name, room.description || '');
-            roomList.appendChild(li);
+            li.onclick = () => { this.selectUser(username); };
+            userList.appendChild(li);
         });
     }
 
-    async selectRoom(roomId, roomName, roomDescription) {
-        this.currentRoom = roomId;
-        this.currentRoomName = roomName;
+    async selectUser(username) {
+        this.currentRecipient = username;
+        this.currentRecipientName = username;
         
-        document.getElementById('currentRoomName').textContent = roomName;
-        document.getElementById('currentRoomDescription').textContent = roomDescription;
+        document.getElementById('currentRoomName').textContent = `Chat with ${username}`;
+        document.getElementById('currentRoomDescription').textContent = '';
 
+        // Update active state
         document.querySelectorAll('.room-item').forEach(item => {
             item.classList.remove('active');
         });
-        event.currentTarget.classList.add('active');
+        
+        // Find and activate the clicked item
+        const items = document.querySelectorAll('.room-item');
+        items.forEach(item => {
+            if (item.textContent.trim() === username) {
+                item.classList.add('active');
+            }
+        });
 
-        await this.loadMessages(roomId);
+        // Fetch recipient's public key for encryption
+        await this.fetchRecipientPublicKey(username);
+
+        this.displayConversation(username);
     }
 
-    async loadMessages(roomId) {
+    async fetchRecipientPublicKey(username) {
+        // Check cache first
+        if (this.recipientPublicKeys.has(username)) {
+            return this.recipientPublicKeys.get(username);
+        }
+
         try {
-            const response = await fetch(`/api/messages/${roomId}`, {
-                headers: { 'Authorization': `Bearer ${this.token}` }
-            });
-            const messages = await response.json();
+            const response = await fetch(`/keys/${username}`);
+            if (!response.ok) {
+                console.warn(`Could not fetch public key for ${username}`);
+                return null;
+            }
+
+            const data = await response.json();
+            const publicKeyBase64 = data.publicKey;
             
-            const messageArea = document.getElementById('messageArea');
-            messageArea.innerHTML = '';
+            if (!publicKeyBase64) {
+                console.warn(`No public key available for ${username}`);
+                return null;
+            }
+
+            // Import and cache the public key
+            const publicKey = await cryptoUtils.importPublicKey(publicKeyBase64);
+            this.recipientPublicKeys.set(username, publicKey);
+            this.publicKeyCache.set(username, publicKeyBase64);
             
-            messages.forEach(msg => this.displayMessage(msg, false));
-            this.scrollToBottom();
+            return publicKey;
         } catch (error) {
-            console.error('Error loading messages:', error);
+            console.error(`Error fetching public key for ${username}:`, error);
+            return null;
         }
     }
 
-    displayMessage(message, animate = true) {
-        if (message.room_id !== this.currentRoom) return;
+    displayConversation(username) {
+        const messageArea = document.getElementById('messageArea');
+        messageArea.innerHTML = '';
+        
+        const messages = this.messageHistory.get(username) || [];
+        
+        messages.forEach(msg => this.displayMessage(msg, false));
+        this.scrollToBottom();
+    }
 
+    displayMessage(message, animate = true) {
         const messageArea = document.getElementById('messageArea');
         const messageDiv = document.createElement('div');
         messageDiv.className = 'message';
         
-        if (message.username === this.username) {
+        if (message.sender === this.username) {
             messageDiv.classList.add('own-message');
         }
 
@@ -265,68 +423,75 @@ class MeadowlarkApp {
 
         messageDiv.innerHTML = `
             <div class="message-header">
-                <span class="message-username">${this.escapeHtml(message.username)}</span>
+                <span class="message-username">${this.escapeHtml(message.sender)}</span>
                 <span class="message-timestamp">${timestamp}</span>
             </div>
             <div class="message-content">${this.escapeHtml(message.content)}</div>
         `;
 
         messageArea.appendChild(messageDiv);
-        this.scrollToBottom();
+        if (animate) {
+            this.scrollToBottom();
+        }
     }
 
-    sendMessage() {
+    async sendMessage() {
         const input = document.getElementById('messageInput');
         const content = input.value.trim();
 
-        if (!content || !this.currentRoom || !this.socket) return;
+        if (!content || !this.currentRecipient || !this.socket) return;
 
-        const message = {
-            username: this.username,
-            room_id: this.currentRoom,
-            content: content,
-            timestamp: new Date().toISOString()
-        };
-
-        this.socket.send(JSON.stringify(message));
-        input.value = '';
-    }
-
-    showCreateRoomModal() {
-        const modal = new bootstrap.Modal(document.getElementById('createRoomModal'));
-        modal.show();
-    }
-
-    async createRoom() {
-        const name = document.getElementById('roomName').value.trim();
-        const description = document.getElementById('roomDescription').value.trim();
-
-        if (!name) {
-            alert('Please enter a room name');
+        // Ensure we have recipient's public key
+        const recipientPublicKey = await this.fetchRecipientPublicKey(this.currentRecipient);
+        
+        if (!recipientPublicKey) {
+            alert('Cannot send message: Recipient\'s public key not available. They may not have encryption set up.');
             return;
         }
 
         try {
-            const response = await fetch('/api/rooms', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${this.token}`
-                },
-                body: JSON.stringify({ name, description })
-            });
+            // Encrypt the message content
+            const encryptedContent = await cryptoUtils.encrypt(content, recipientPublicKey);
+            
+            // Convert encrypted ArrayBuffer to base64 for JSON transmission
+            const encryptedBase64 = cryptoUtils.arrayBufferToBase64(encryptedContent);
 
-            if (response.ok) {
-                const modal = bootstrap.Modal.getInstance(document.getElementById('createRoomModal'));
-                modal.hide();
-                document.getElementById('roomName').value = '';
-                document.getElementById('roomDescription').value = '';
-                await this.loadRooms();
+            // Backend expects: { Recipient, Sender, Content: []byte }
+            // Content is encrypted bytes (base64 encoded in JSON)
+            const message = {
+                recipient: this.currentRecipient,
+                sender: this.username,
+                content: encryptedBase64
+            };
+
+            // Also add to local history immediately for better UX (plain text)
+            const conversationKey = this.currentRecipient;
+            if (!this.messageHistory.has(conversationKey)) {
+                this.messageHistory.set(conversationKey, []);
             }
+            
+            const messageObj = {
+                sender: this.username,
+                recipient: this.currentRecipient,
+                content: content, // Store plain text in local history
+                timestamp: new Date().toISOString()
+            };
+            
+            this.messageHistory.get(conversationKey).push(messageObj);
+            this.displayMessage(messageObj);
+
+            // Send encrypted message
+            this.socket.send(JSON.stringify(message));
+            input.value = '';
         } catch (error) {
-            console.error('Error creating room:', error);
-            alert('Failed to create room. Please try again.');
+            console.error('Error encrypting/sending message:', error);
+            alert('Failed to send message: ' + error.message);
         }
+    }
+
+    updateUserUnreadStatus(username) {
+        // Could add visual indicator for unread messages
+        // For now, just a placeholder
     }
 
     scrollToBottom() {
@@ -343,4 +508,8 @@ class MeadowlarkApp {
 
 // Initialize the app when the DOM is loaded
 const app = new MeadowlarkApp();
-app.init();
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => app.init());
+} else {
+    app.init();
+}

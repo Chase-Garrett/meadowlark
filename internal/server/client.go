@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"log"
 
@@ -17,6 +18,13 @@ type Client struct {
 	username string
 }
 
+// IncomingMessage represents a message received from the client
+type IncomingMessage struct {
+	Recipient string      `json:"recipient"`
+	Sender    string      `json:"sender"`
+	Content   interface{} `json:"content"` // Can be string or base64 string
+}
+
 func (c *Client) readPump() {
 	defer func() {
 		c.hub.unregister <- c
@@ -31,11 +39,42 @@ func (c *Client) readPump() {
 			break
 		}
 
-		var msg protocol.Message
-		if err := json.Unmarshal(messageBytes, &msg); err == nil {
-			msg.Sender = c.username // ensure correctly identified sender
-			c.hub.forward <- &msg
+		var incoming IncomingMessage
+		if err := json.Unmarshal(messageBytes, &incoming); err != nil {
+			log.Printf("Error unmarshaling message: %v", err)
+			continue
 		}
+
+		// Convert content to []byte
+		// Frontend sends encrypted content as base64 string, we decode it to []byte
+		var contentBytes []byte
+		if contentStr, ok := incoming.Content.(string); ok {
+			// Content is base64-encoded encrypted bytes
+			// Decode base64 to get the actual encrypted byte array
+			decoded, err := base64.StdEncoding.DecodeString(contentStr)
+			if err != nil {
+				log.Printf("Error decoding base64 content: %v", err)
+				continue
+			}
+			contentBytes = decoded
+		} else {
+			// Fallback: try to unmarshal as protocol.Message for base64 []byte support
+			var msg protocol.Message
+			if json.Unmarshal(messageBytes, &msg) == nil {
+				contentBytes = msg.Content
+			} else {
+				log.Printf("Could not parse content, expected string, got: %T", incoming.Content)
+				continue
+			}
+		}
+
+		msg := &protocol.Message{
+			Recipient: incoming.Recipient,
+			Sender:    c.username, // ensure correctly identified sender
+			Content:   contentBytes,
+		}
+
+		c.hub.forward <- msg
 	}
 }
 
@@ -51,8 +90,13 @@ func (c *Client) writePump() {
 				return
 			}
 			messageBytes, err := json.Marshal(message)
-			if err == nil {
-				c.conn.WriteMessage(websocket.TextMessage, messageBytes)
+			if err != nil {
+				log.Printf("Error marshaling message: %v", err)
+				continue
+			}
+			if err := c.conn.WriteMessage(websocket.TextMessage, messageBytes); err != nil {
+				log.Printf("Error writing message: %v", err)
+				return
 			}
 		}
 	}
