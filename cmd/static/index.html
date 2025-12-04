@@ -63,11 +63,8 @@
                         </div>
                     </div>
                     <div class="p-3">
-                        <h6 class="text-uppercase text-muted mb-3" style="font-size: 0.75rem;">Chat Rooms</h6>
-                        <ul id="roomList" class="room-list"></ul>
-                        <button class="btn btn-primary btn-create-room" onclick="app.showCreateRoomModal()">
-                            + Create Room
-                        </button>
+                        <h6 class="text-uppercase text-muted mb-3" style="font-size: 0.75rem;">Users</h6>
+                        <ul id="userList" class="room-list"></ul>
                     </div>
                 </div>
 
@@ -76,7 +73,7 @@
                     <div class="chat-container">
                         <div class="chat-header">
                             <div>
-                                <h4 id="currentRoomName">Select a room to start chatting</h4>
+                                <h4 id="currentRoomName">Select a user to start chatting</h4>
                                 <small id="currentRoomDescription" class="text-muted"></small>
                             </div>
                             <span id="connectionStatus" class="connection-status status-disconnected">Disconnected</span>
@@ -86,7 +83,7 @@
                             <div class="empty-state">
                                 <div class="empty-state-icon">💬</div>
                                 <h5>Welcome to Meadowlark!</h5>
-                                <p>Select a room from the sidebar to start messaging</p>
+                                <p>Select a user from the sidebar to start messaging</p>
                             </div>
                         </div>
 
@@ -99,32 +96,6 @@
                             </div>
                         </div>
                     </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Create Room Modal -->
-    <div class="modal fade" id="createRoomModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title">Create New Room</h5>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="mb-3">
-                        <label for="roomName" class="form-label">Room Name</label>
-                        <input type="text" class="form-control" id="roomName" placeholder="Enter room name">
-                    </div>
-                    <div class="mb-3">
-                        <label for="roomDescription" class="form-label">Description (Optional)</label>
-                        <textarea class="form-control" id="roomDescription" rows="3" placeholder="Enter room description"></textarea>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="button" class="btn btn-primary" onclick="app.createRoom()">Create Room</button>
                 </div>
             </div>
         </div>

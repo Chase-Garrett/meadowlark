@@ -1,13 +1,14 @@
 class MeadowlarkApp {
     constructor() {
         this.socket = null;
-        this.currentRoom = null;
-        this.currentRoomName = '';
+        this.currentRecipient = null;
+        this.currentRecipientName = '';
         this.username = null;
         this.token = null;
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 5;
-        this.messageHistory = new Map();
+        this.messageHistory = new Map(); // Map<recipient, messages[]>
+        this.users = [];
     }
 
     init() {
@@ -58,7 +59,7 @@ class MeadowlarkApp {
 
             if (response.ok) {
                 this.token = data.token;
-                this.username = username;
+                this.username = data.username;
                 localStorage.setItem('meadowlark_token', this.token);
                 localStorage.setItem('meadowlark_username', this.username);
                 this.showApp();
@@ -120,7 +121,7 @@ class MeadowlarkApp {
         document.getElementById('currentUsername').textContent = this.username;
         
         this.connectWebSocket();
-        this.loadRooms();
+        this.loadUsers();
     }
 
     logout() {
@@ -134,7 +135,7 @@ class MeadowlarkApp {
 
     connectWebSocket() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        const wsUrl = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(this.token)}`;
 
         this.socket = new WebSocket(wsUrl);
 
@@ -145,8 +146,12 @@ class MeadowlarkApp {
         };
 
         this.socket.onmessage = (event) => {
-            const message = JSON.parse(event.data);
-            this.displayMessage(message);
+            try {
+                const message = JSON.parse(event.data);
+                this.handleIncomingMessage(message);
+            } catch (error) {
+                console.error('Error parsing WebSocket message:', error);
+            }
         };
 
         this.socket.onclose = () => {
@@ -158,6 +163,61 @@ class MeadowlarkApp {
         this.socket.onerror = (error) => {
             console.error('WebSocket error:', error);
         };
+    }
+
+    handleIncomingMessage(message) {
+        // Backend sends: { Recipient, Sender, Content: []byte }
+        // We need to handle the Content as base64 or UTF-8
+        
+        const sender = message.sender || message.Sender;
+        const recipient = message.recipient || message.Recipient;
+        
+        // Determine if this message is for the current conversation
+        const isForCurrentConversation = 
+            (sender === this.currentRecipient && recipient === this.username) ||
+            (sender === this.username && recipient === this.currentRecipient);
+
+        // Decode content (assuming it's base64 encoded bytes)
+        let content = '';
+        if (message.content || message.Content) {
+            const contentBytes = message.content || message.Content;
+            if (typeof contentBytes === 'string') {
+                // If it's a base64 string, decode it
+                try {
+                    const decoded = atob(contentBytes);
+                    content = decoded;
+                } catch {
+                    // If not base64, treat as plain string
+                    content = contentBytes;
+                }
+            } else if (Array.isArray(contentBytes)) {
+                // If it's an array of bytes
+                content = String.fromCharCode(...contentBytes);
+            }
+        }
+
+        // Add to message history
+        const conversationKey = sender === this.username ? recipient : sender;
+        if (!this.messageHistory.has(conversationKey)) {
+            this.messageHistory.set(conversationKey, []);
+        }
+        
+        const messageObj = {
+            sender: sender,
+            recipient: recipient,
+            content: content,
+            timestamp: new Date().toISOString()
+        };
+        
+        this.messageHistory.get(conversationKey).push(messageObj);
+
+        // Display if it's for the current conversation
+        if (isForCurrentConversation) {
+            this.displayMessage(messageObj);
+        } else {
+            // Show notification or update UI for unread messages
+            this.updateUserUnreadStatus(sender);
+        }
     }
 
     attemptReconnect() {
@@ -179,82 +239,87 @@ class MeadowlarkApp {
         }
     }
 
-    async loadRooms() {
+    async loadUsers() {
         try {
-            const response = await fetch('/api/rooms', {
+            const response = await fetch('/api/users', {
                 headers: { 'Authorization': `Bearer ${this.token}` }
             });
-            const rooms = await response.json();
-            this.displayRooms(rooms);
+            
+            if (!response.ok) {
+                throw new Error('Failed to load users');
+            }
+            
+            const users = await response.json();
+            // Filter out current user
+            this.users = users.filter(u => u !== this.username);
+            this.displayUsers(this.users);
         } catch (error) {
-            console.error('Error loading rooms:', error);
+            console.error('Error loading users:', error);
         }
     }
 
-    displayRooms(rooms) {
-        const roomList = document.getElementById('roomList');
-        roomList.innerHTML = '';
+    displayUsers(users) {
+        const userList = document.getElementById('userList');
+        userList.innerHTML = '';
 
-        if (rooms.length === 0) {
-            roomList.innerHTML = '<li class="text-muted p-3 text-center">No rooms yet. Create one!</li>';
+        if (users.length === 0) {
+            userList.innerHTML = '<li class="text-muted p-3 text-center">No other users yet.</li>';
             return;
         }
 
-        rooms.forEach(room => {
+        users.forEach(username => {
             const li = document.createElement('li');
-            li.className = 'room-item';
-            if (room.id === this.currentRoom) {
+            li.className = 'room-item'; // Reuse room-item class
+            if (username === this.currentRecipient) {
                 li.classList.add('active');
             }
             li.innerHTML = `
-                <div class="room-name">${this.escapeHtml(room.name)}</div>
-                ${room.description ? `<div class="room-description">${this.escapeHtml(room.description)}</div>` : ''}
+                <div class="room-name">${this.escapeHtml(username)}</div>
             `;
-            li.onclick = () => this.selectRoom(room.id, room.name, room.description || '');
-            roomList.appendChild(li);
+            li.onclick = () => this.selectUser(username);
+            userList.appendChild(li);
         });
     }
 
-    async selectRoom(roomId, roomName, roomDescription) {
-        this.currentRoom = roomId;
-        this.currentRoomName = roomName;
+    selectUser(username) {
+        this.currentRecipient = username;
+        this.currentRecipientName = username;
         
-        document.getElementById('currentRoomName').textContent = roomName;
-        document.getElementById('currentRoomDescription').textContent = roomDescription;
+        document.getElementById('currentRoomName').textContent = `Chat with ${username}`;
+        document.getElementById('currentRoomDescription').textContent = '';
 
+        // Update active state
         document.querySelectorAll('.room-item').forEach(item => {
             item.classList.remove('active');
         });
-        event.currentTarget.classList.add('active');
+        
+        // Find and activate the clicked item
+        const items = document.querySelectorAll('.room-item');
+        items.forEach(item => {
+            if (item.textContent.trim() === username) {
+                item.classList.add('active');
+            }
+        });
 
-        await this.loadMessages(roomId);
+        this.displayConversation(username);
     }
 
-    async loadMessages(roomId) {
-        try {
-            const response = await fetch(`/api/messages/${roomId}`, {
-                headers: { 'Authorization': `Bearer ${this.token}` }
-            });
-            const messages = await response.json();
-            
-            const messageArea = document.getElementById('messageArea');
-            messageArea.innerHTML = '';
-            
-            messages.forEach(msg => this.displayMessage(msg, false));
-            this.scrollToBottom();
-        } catch (error) {
-            console.error('Error loading messages:', error);
-        }
+    displayConversation(username) {
+        const messageArea = document.getElementById('messageArea');
+        messageArea.innerHTML = '';
+        
+        const messages = this.messageHistory.get(username) || [];
+        
+        messages.forEach(msg => this.displayMessage(msg, false));
+        this.scrollToBottom();
     }
 
     displayMessage(message, animate = true) {
-        if (message.room_id !== this.currentRoom) return;
-
         const messageArea = document.getElementById('messageArea');
         const messageDiv = document.createElement('div');
         messageDiv.className = 'message';
         
-        if (message.username === this.username) {
+        if (message.sender === this.username) {
             messageDiv.classList.add('own-message');
         }
 
@@ -265,68 +330,55 @@ class MeadowlarkApp {
 
         messageDiv.innerHTML = `
             <div class="message-header">
-                <span class="message-username">${this.escapeHtml(message.username)}</span>
+                <span class="message-username">${this.escapeHtml(message.sender)}</span>
                 <span class="message-timestamp">${timestamp}</span>
             </div>
             <div class="message-content">${this.escapeHtml(message.content)}</div>
         `;
 
         messageArea.appendChild(messageDiv);
-        this.scrollToBottom();
+        if (animate) {
+            this.scrollToBottom();
+        }
     }
 
     sendMessage() {
         const input = document.getElementById('messageInput');
         const content = input.value.trim();
 
-        if (!content || !this.currentRoom || !this.socket) return;
+        if (!content || !this.currentRecipient || !this.socket) return;
 
+        // Backend expects: { Recipient, Sender, Content: []byte }
+        // Send content as plain string, backend will convert to []byte
         const message = {
-            username: this.username,
-            room_id: this.currentRoom,
+            recipient: this.currentRecipient,
+            sender: this.username,
+            content: content
+        };
+
+        // Also add to local history immediately for better UX
+        const conversationKey = this.currentRecipient;
+        if (!this.messageHistory.has(conversationKey)) {
+            this.messageHistory.set(conversationKey, []);
+        }
+        
+        const messageObj = {
+            sender: this.username,
+            recipient: this.currentRecipient,
             content: content,
             timestamp: new Date().toISOString()
         };
+        
+        this.messageHistory.get(conversationKey).push(messageObj);
+        this.displayMessage(messageObj);
 
         this.socket.send(JSON.stringify(message));
         input.value = '';
     }
 
-    showCreateRoomModal() {
-        const modal = new bootstrap.Modal(document.getElementById('createRoomModal'));
-        modal.show();
-    }
-
-    async createRoom() {
-        const name = document.getElementById('roomName').value.trim();
-        const description = document.getElementById('roomDescription').value.trim();
-
-        if (!name) {
-            alert('Please enter a room name');
-            return;
-        }
-
-        try {
-            const response = await fetch('/api/rooms', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${this.token}`
-                },
-                body: JSON.stringify({ name, description })
-            });
-
-            if (response.ok) {
-                const modal = bootstrap.Modal.getInstance(document.getElementById('createRoomModal'));
-                modal.hide();
-                document.getElementById('roomName').value = '';
-                document.getElementById('roomDescription').value = '';
-                await this.loadRooms();
-            }
-        } catch (error) {
-            console.error('Error creating room:', error);
-            alert('Failed to create room. Please try again.');
-        }
+    updateUserUnreadStatus(username) {
+        // Could add visual indicator for unread messages
+        // For now, just a placeholder
     }
 
     scrollToBottom() {
@@ -343,4 +395,8 @@ class MeadowlarkApp {
 
 // Initialize the app when the DOM is loaded
 const app = new MeadowlarkApp();
-app.init();
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => app.init());
+} else {
+    app.init();
+}
