@@ -1,7 +1,7 @@
 package server
 
 import (
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -159,9 +159,10 @@ func (s *Server) HandleGetPublicKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	// Return public key as base64 (Web Crypto API format)
 	json.NewEncoder(w).Encode(map[string]string{
 		"username":  username,
-		"publicKey": hex.EncodeToString(publicKey),
+		"publicKey": base64.StdEncoding.EncodeToString(publicKey),
 	})
 }
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"log"
 
@@ -45,10 +46,17 @@ func (c *Client) readPump() {
 		}
 
 		// Convert content to []byte
-		// Frontend sends content as a string, we convert to []byte
+		// Frontend sends encrypted content as base64 string, we decode it to []byte
 		var contentBytes []byte
 		if contentStr, ok := incoming.Content.(string); ok {
-			contentBytes = []byte(contentStr)
+			// Content is base64-encoded encrypted bytes
+			// Decode base64 to get the actual encrypted byte array
+			decoded, err := base64.StdEncoding.DecodeString(contentStr)
+			if err != nil {
+				log.Printf("Error decoding base64 content: %v", err)
+				continue
+			}
+			contentBytes = decoded
 		} else {
 			// Fallback: try to unmarshal as protocol.Message for base64 []byte support
 			var msg protocol.Message
