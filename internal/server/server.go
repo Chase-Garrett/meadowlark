@@ -41,6 +41,7 @@ func NewServer() *Server {
 // RegistrationRequest defines JSON for the /register endpoint
 type RegistrationRequest struct {
 	Username  string `json:"username"`
+	Email     string `json:"email"`
 	Password  string `json:"password"`
 	Email     string `json:"email"`     // Frontend sends this, we'll accept it but not store it yet
 	PublicKey string `json:"publicKey"` // Optional
@@ -56,6 +57,12 @@ type LoginRequest struct {
 type LoginResponse struct {
 	Token    string `json:"token"`
 	Username string `json:"username"`
+}
+
+// LoginRequest defines JSON for the /login endpoint
+type LoginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 // HandleRegister handles the registration of a user
@@ -298,7 +305,12 @@ func Start() {
 	// WebSocket endpoint
 	http.HandleFunc("/ws", server.HandleConnections)
 
+	// Serve static files (must be last)
+	fs := http.FileServer(http.Dir("./cmd/static"))
+	http.Handle("/", fs)
+
 	log.Println("HTTP server started on :8080")
+	log.Println("Serving static files from: ./cmd/static")
 	err := http.ListenAndServe(":8080", nil)
 	if err != nil {
 		log.Fatal("ListenAndServe: ", err)
