@@ -9,6 +9,9 @@ class MeadowlarkApp {
         this.maxReconnectAttempts = 5;
         this.messageHistory = new Map(); // Map<recipient, messages[]>
         this.users = [];
+        this.keys = null; // {publicKey: CryptoKey, privateKey: CryptoKey}
+        this.recipientPublicKeys = new Map(); // Map<username, CryptoKey>
+        this.publicKeyCache = new Map(); // Map<username, base64 string>
     }
 
     init() {
@@ -62,6 +65,10 @@ class MeadowlarkApp {
                 this.username = data.username;
                 localStorage.setItem('meadowlark_token', this.token);
                 localStorage.setItem('meadowlark_username', this.username);
+                
+                // Load encryption keys or generate new ones if missing
+                await this.initializeEncryption();
+                
                 this.showApp();
             } else {
                 this.showAlert(alertDiv, data.error || 'Login failed');
@@ -69,6 +76,31 @@ class MeadowlarkApp {
         } catch (error) {
             this.showAlert(alertDiv, 'Connection error. Please try again.');
             console.error('Login error:', error);
+        }
+    }
+
+    async initializeEncryption() {
+        // Try to load existing keys
+        this.keys = await cryptoUtils.loadKeys();
+        
+        if (!this.keys) {
+            // Generate new keys if none exist (for old users)
+            console.log('No encryption keys found, generating new keys...');
+            const keyPair = await cryptoUtils.generateKeyPair();
+            await cryptoUtils.storeKeys(keyPair);
+            this.keys = { 
+                publicKey: keyPair.publicKey, 
+                privateKey: keyPair.privateKey 
+            };
+            
+            // Upload public key to server (update existing user)
+            try {
+                const publicKeyBase64 = await cryptoUtils.exportPublicKey(this.keys.publicKey);
+                // Note: You might want to add an endpoint to update public key
+                console.log('Generated new keys. Consider updating public key on server.');
+            } catch (error) {
+                console.error('Error updating public key:', error);
+            }
         }
     }
 
@@ -89,10 +121,27 @@ class MeadowlarkApp {
         }
 
         try {
+            // Generate encryption keys for new user
+            alertDiv.textContent = 'Generating encryption keys...';
+            alertDiv.className = 'alert alert-info';
+            alertDiv.classList.remove('d-none');
+            
+            const keyPair = await cryptoUtils.generateKeyPair();
+            const publicKeyBase64 = await cryptoUtils.exportPublicKey(keyPair.publicKey);
+            
+            // Store keys locally
+            await cryptoUtils.storeKeys(keyPair);
+
+            // Register with public key
             const response = await fetch('/api/register', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, email, password })
+                body: JSON.stringify({ 
+                    username, 
+                    email, 
+                    password,
+                    publicKey: publicKeyBase64
+                })
             });
 
             const data = await response.json();
@@ -104,7 +153,7 @@ class MeadowlarkApp {
                 this.showAlert(alertDiv, data.error || 'Registration failed');
             }
         } catch (error) {
-            this.showAlert(alertDiv, 'Connection error. Please try again.');
+            this.showAlert(alertDiv, 'Error: ' + error.message);
             console.error('Registration error:', error);
         }
     }
@@ -115,10 +164,15 @@ class MeadowlarkApp {
         element.classList.remove('d-none');
     }
 
-    showApp() {
+    async showApp() {
         document.getElementById('authContainer').style.display = 'none';
         document.getElementById('appContainer').style.display = 'block';
         document.getElementById('currentUsername').textContent = this.username;
+        
+        // Ensure encryption is initialized
+        if (!this.keys) {
+            await this.initializeEncryption();
+        }
         
         this.connectWebSocket();
         this.loadUsers();
@@ -145,10 +199,10 @@ class MeadowlarkApp {
             this.reconnectAttempts = 0;
         };
 
-        this.socket.onmessage = (event) => {
+        this.socket.onmessage = async (event) => {
             try {
                 const message = JSON.parse(event.data);
-                this.handleIncomingMessage(message);
+                await this.handleIncomingMessage(message);
             } catch (error) {
                 console.error('Error parsing WebSocket message:', error);
             }
@@ -165,9 +219,9 @@ class MeadowlarkApp {
         };
     }
 
-    handleIncomingMessage(message) {
+    async handleIncomingMessage(message) {
         // Backend sends: { Recipient, Sender, Content: []byte }
-        // We need to handle the Content as base64 or UTF-8
+        // Content is encrypted and base64 encoded in JSON
         
         const sender = message.sender || message.Sender;
         const recipient = message.recipient || message.Recipient;
@@ -177,22 +231,25 @@ class MeadowlarkApp {
             (sender === this.currentRecipient && recipient === this.username) ||
             (sender === this.username && recipient === this.currentRecipient);
 
-        // Decode content (assuming it's base64 encoded bytes)
+        // Decrypt the message content
         let content = '';
         if (message.content || message.Content) {
-            const contentBytes = message.content || message.Content;
-            if (typeof contentBytes === 'string') {
-                // If it's a base64 string, decode it
+            const encryptedContentBase64 = message.content || message.Content;
+            
+            if (!this.keys || !this.keys.privateKey) {
+                console.error('Cannot decrypt message: No private key available');
+                content = '[Encrypted message - unable to decrypt]';
+            } else {
                 try {
-                    const decoded = atob(contentBytes);
-                    content = decoded;
-                } catch {
-                    // If not base64, treat as plain string
-                    content = contentBytes;
+                    // Convert base64 to ArrayBuffer
+                    const encryptedContent = cryptoUtils.base64ToArrayBuffer(encryptedContentBase64);
+                    
+                    // Decrypt using our private key
+                    content = await cryptoUtils.decrypt(encryptedContent, this.keys.privateKey);
+                } catch (error) {
+                    console.error('Error decrypting message:', error);
+                    content = '[Error decrypting message]';
                 }
-            } else if (Array.isArray(contentBytes)) {
-                // If it's an array of bytes
-                content = String.fromCharCode(...contentBytes);
             }
         }
 
@@ -276,12 +333,12 @@ class MeadowlarkApp {
             li.innerHTML = `
                 <div class="room-name">${this.escapeHtml(username)}</div>
             `;
-            li.onclick = () => this.selectUser(username);
+            li.onclick = () => { this.selectUser(username); };
             userList.appendChild(li);
         });
     }
 
-    selectUser(username) {
+    async selectUser(username) {
         this.currentRecipient = username;
         this.currentRecipientName = username;
         
@@ -301,7 +358,43 @@ class MeadowlarkApp {
             }
         });
 
+        // Fetch recipient's public key for encryption
+        await this.fetchRecipientPublicKey(username);
+
         this.displayConversation(username);
+    }
+
+    async fetchRecipientPublicKey(username) {
+        // Check cache first
+        if (this.recipientPublicKeys.has(username)) {
+            return this.recipientPublicKeys.get(username);
+        }
+
+        try {
+            const response = await fetch(`/keys/${username}`);
+            if (!response.ok) {
+                console.warn(`Could not fetch public key for ${username}`);
+                return null;
+            }
+
+            const data = await response.json();
+            const publicKeyBase64 = data.publicKey;
+            
+            if (!publicKeyBase64) {
+                console.warn(`No public key available for ${username}`);
+                return null;
+            }
+
+            // Import and cache the public key
+            const publicKey = await cryptoUtils.importPublicKey(publicKeyBase64);
+            this.recipientPublicKeys.set(username, publicKey);
+            this.publicKeyCache.set(username, publicKeyBase64);
+            
+            return publicKey;
+        } catch (error) {
+            console.error(`Error fetching public key for ${username}:`, error);
+            return null;
+        }
     }
 
     displayConversation(username) {
@@ -342,38 +435,58 @@ class MeadowlarkApp {
         }
     }
 
-    sendMessage() {
+    async sendMessage() {
         const input = document.getElementById('messageInput');
         const content = input.value.trim();
 
         if (!content || !this.currentRecipient || !this.socket) return;
 
-        // Backend expects: { Recipient, Sender, Content: []byte }
-        // Send content as plain string, backend will convert to []byte
-        const message = {
-            recipient: this.currentRecipient,
-            sender: this.username,
-            content: content
-        };
-
-        // Also add to local history immediately for better UX
-        const conversationKey = this.currentRecipient;
-        if (!this.messageHistory.has(conversationKey)) {
-            this.messageHistory.set(conversationKey, []);
+        // Ensure we have recipient's public key
+        const recipientPublicKey = await this.fetchRecipientPublicKey(this.currentRecipient);
+        
+        if (!recipientPublicKey) {
+            alert('Cannot send message: Recipient\'s public key not available. They may not have encryption set up.');
+            return;
         }
-        
-        const messageObj = {
-            sender: this.username,
-            recipient: this.currentRecipient,
-            content: content,
-            timestamp: new Date().toISOString()
-        };
-        
-        this.messageHistory.get(conversationKey).push(messageObj);
-        this.displayMessage(messageObj);
 
-        this.socket.send(JSON.stringify(message));
-        input.value = '';
+        try {
+            // Encrypt the message content
+            const encryptedContent = await cryptoUtils.encrypt(content, recipientPublicKey);
+            
+            // Convert encrypted ArrayBuffer to base64 for JSON transmission
+            const encryptedBase64 = cryptoUtils.arrayBufferToBase64(encryptedContent);
+
+            // Backend expects: { Recipient, Sender, Content: []byte }
+            // Content is encrypted bytes (base64 encoded in JSON)
+            const message = {
+                recipient: this.currentRecipient,
+                sender: this.username,
+                content: encryptedBase64
+            };
+
+            // Also add to local history immediately for better UX (plain text)
+            const conversationKey = this.currentRecipient;
+            if (!this.messageHistory.has(conversationKey)) {
+                this.messageHistory.set(conversationKey, []);
+            }
+            
+            const messageObj = {
+                sender: this.username,
+                recipient: this.currentRecipient,
+                content: content, // Store plain text in local history
+                timestamp: new Date().toISOString()
+            };
+            
+            this.messageHistory.get(conversationKey).push(messageObj);
+            this.displayMessage(messageObj);
+
+            // Send encrypted message
+            this.socket.send(JSON.stringify(message));
+            input.value = '';
+        } catch (error) {
+            console.error('Error encrypting/sending message:', error);
+            alert('Failed to send message: ' + error.message);
+        }
     }
 
     updateUserUnreadStatus(username) {

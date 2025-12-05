@@ -2,9 +2,12 @@ package auth
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -42,8 +45,9 @@ func NewUserStorage(dbPath string) *UserStorage {
 }
 
 // RegisterNewUser creates a new user, hashes their password and stores them in the db
-// publicKeyHex is optional - if empty, public_key will be NULL
-func (s *UserStorage) RegisterNewUser(username, password string, publicKeyHex string) error {
+// publicKeyBase64 is optional - if empty, public_key will be NULL
+// Accepts base64-encoded public key (SPKI format from Web Crypto API)
+func (s *UserStorage) RegisterNewUser(username, password string, publicKeyBase64 string) error {
 	if username == "" || password == "" {
 		return errors.New("username and password cannot be empty")
 	}
@@ -58,20 +62,48 @@ func (s *UserStorage) RegisterNewUser(username, password string, publicKeyHex st
 	}
 
 	var publicKeyBytes interface{}
-	if publicKeyHex != "" {
-		decoded, err := hex.DecodeString(publicKeyHex)
+	if publicKeyBase64 != "" {
+		// Try base64 first (Web Crypto API format)
+		decoded, err := base64.StdEncoding.DecodeString(publicKeyBase64)
 		if err != nil {
-			return errors.New("invalid public key format")
+			// Fallback: try hex format for backwards compatibility
+			decoded, hexErr := hex.DecodeString(publicKeyBase64)
+			if hexErr != nil {
+				return fmt.Errorf("invalid public key format: expected base64 or hex, got error: %v", err)
+			}
+			publicKeyBytes = decoded
+		} else {
+			publicKeyBytes = decoded
 		}
-		publicKeyBytes = decoded
 	} else {
 		publicKeyBytes = nil
 	}
 
+	// First check if username already exists
+	var existingUsername string
+	checkSQL := `SELECT username FROM users WHERE username = ?`
+	err = s.db.QueryRow(checkSQL, username).Scan(&existingUsername)
+	if err == nil {
+		// Username exists
+		return errors.New("username already exists")
+	}
+	if err != sql.ErrNoRows {
+		// Some other database error occurred
+		return fmt.Errorf("database error: %v", err)
+	}
+
+	// Username doesn't exist, proceed with insertion
 	insertSQL := `INSERT INTO users (username, hashed_password, public_key) VALUES (?, ?, ?)`
 	_, err = s.db.Exec(insertSQL, username, hashedPassword, publicKeyBytes)
 	if err != nil {
-		return errors.New("username already exists")
+		// Check if it's a UNIQUE constraint violation (primary key)
+		if strings.Contains(err.Error(), "UNIQUE constraint") ||
+			strings.Contains(err.Error(), "PRIMARY KEY") ||
+			strings.Contains(err.Error(), "unique constraint") {
+			return errors.New("username already exists")
+		}
+		// Some other database error
+		return fmt.Errorf("failed to register user: %v", err)
 	}
 
 	return nil
